@@ -46,13 +46,18 @@ plus the call's message). Looking each body up in the target's own `state.db`:
 
 | verdict | count | how it was decided |
 |---|---:|---|
-| arrived, settle missed it | 18 | target store holds the body (head and/or tail text) |
-| no copy anywhere in the target store | 13 | neither the first nor the last 150 chars of the body appear in any row |
+| arrived, settle missed it | 5 | a `role='user'` row in the target store holds the body |
+| no copy in any user row of the target store | 26 | neither the first nor the last 150 chars of the body appear |
 | of those, sender told it failed | 2 | sender store holds the run's failure notification |
-| **of those, nothing on either side** | **11** | no copy in the target, no failure notice to the sender |
+| **of those, nothing on either side** | **24** | no copy in the target, no failure notice to the sender |
 
-**Eleven sends have no arrival and no failure record: 6 to ops, 1 to chief-of-staff, 4 to builder
-(2026-11-26, 02:53–03:25).** The builder four are the strongest case because the sender said so in
+(An earlier pass reported 18/13; that test counted matches in any role, so an assistant row quoting
+the message read as an arrival. `role='user'` is the only row a delivery writes.)
+
+**Twenty-four sends have no arrival and no failure record: 19 to ops, 1 to chief-of-staff, 4 to
+builder (2026-11-26, 02:53–03:25).** Of the 5 that arrived, 2 were judged before the owner wrote its
+row and 3 were judged after the row existed and still missed — a matcher false negative, separate
+from both defects here. The builder four are the strongest case because the sender said so in
 writing — chief-of-staff's next message to builder (04:11:16Z) opens *"Fresh order, re-issued because
 the original never landed."*
 
