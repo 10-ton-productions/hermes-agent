@@ -1,5 +1,5 @@
 --- bot_mode_dm.py.orig	2026-11-15 08:18:20.009290654 -0700
-+++ bot_mode_dm.py	2026-11-25 21:57:30.538643289 -0700
++++ bot_mode_dm.py	2026-11-25 22:06:10.307031909 -0700
 @@ -701,6 +701,43 @@
          logger.debug("delivered-journal write failed", exc_info=True)
  
@@ -44,7 +44,24 @@
  def _body_identity(dm_file: Optional[str]) -> dict:
      """The handed-off body's identity: 16 hex of squashed sha256, plus its squashed length.
  
-@@ -1206,6 +1243,7 @@
+@@ -721,7 +758,7 @@
+ 
+ 
+ def _journal_spawn(dm_file: Optional[str], *, delivery_id: str, proc_id: str,
+-                   pid: Optional[int], label: str) -> None:
++                   pid: Optional[int], label: str, sender: Optional[str] = None) -> None:
+     """One row when a delivery is handed to its process, not when that process finishes.
+ 
+     A delivery whose process died before writing an outcome left nothing at all: the ack said
+@@ -749,6 +786,7 @@
+            "proc": proc_id,
+            "pid": pid,
+            "target": (label or "").lstrip("@") or None,
++           "sender": sender or None,
+            "payload_id": Path(dm_file).name if dm_file else None}
+     row.update(_body_identity(dm_file))
+     try:
+@@ -1206,6 +1244,7 @@
      from tools.bot_live_delivery import await_delivery, cancel_queued_delivery, owner_holds_delivery
  
      deadline = time.monotonic() + _LIVE_WAIT_MAX_SECONDS
@@ -52,7 +69,7 @@
      missed = 0
      while True:
          record = await_delivery(home, delivery_id, max(0.0, min(_LIVE_WAIT_SECONDS, deadline - time.monotonic())))
-@@ -1237,6 +1275,12 @@
+@@ -1237,6 +1276,12 @@
      status = record["status"] if record else "ambiguous"
      payload = {key: record[key] for key in ("reply", "error", "reason") if record and record.get(key)}
      payload.update(status=status, delivery_id=delivery_id)
@@ -65,7 +82,7 @@
      if status in ("queued", "claimed", "ambiguous"):
          payload["detail"] = "Delivery remains pending or its outcome is unknown. Do not resend; receipt is retained."
      elif status == "settled" and dm_file is not None:
-@@ -1482,7 +1526,8 @@
+@@ -1482,7 +1527,8 @@
                  "evidence_file": dm_file})
          if record is not None:
              command = _delivery_command(argv, dm_file, stdin_file=False, profile_home=profile_home, author=author)
@@ -75,12 +92,19 @@
              result = dict(status=record["status"], delivery_id=record["delivery_id"], to=label,
                            detail="Durably queued for the live Bot Chat owner. Do NOT wait or resend; finish your turn.")
              if notification.get("error"):
-@@ -1507,12 +1552,20 @@
+@@ -1503,16 +1549,26 @@
+     except BaseException:
+         _unlink_dm_file(dm_file)
+         raise
+-    return _spawn_delivery(command, label, dm_file=dm_file, task_id=task_id, agent=agent)
++    return _spawn_delivery(command, label, dm_file=dm_file, task_id=task_id, agent=agent,
++                           sender=(author or {}).get("id"))
  
  
  def _spawn_delivery(command: str, label: str, *, dm_file: Optional[str] = None, delivery_id: Optional[str] = None,
 -                    task_id: Optional[str], agent: Any) -> str:
-+                    task_id: Optional[str], agent: Any, journal_dm_file: Optional[str] = None) -> str:
++                    task_id: Optional[str], agent: Any, journal_dm_file: Optional[str] = None,
++                    sender: Optional[str] = None) -> str:
      """Launch the cleanup-owning runner and transfer file ownership on ack. ``dm_file``
      is None for relay deliveries (the waiter watches a reply file; envelope artifacts
      are owned/swept by ``tools/bot_relay.py``), which pass the envelope id as ``delivery_id``
@@ -98,15 +122,17 @@
      transferred = False
      try:
          from tools.terminal_tool import terminal_tool
-@@ -1539,8 +1592,9 @@
+@@ -1539,9 +1595,10 @@
          transferred = True
          # Journal the hand-off BEFORE the ack is returned: a process that dies silently must leave
          # the row it created, so the lane can tell a lost delivery from one it never started.
 -        _journal_spawn(dm_file,
 -                       delivery_id=delivery_id or (_dm_delivery_id(dm_file) if dm_file else ""),
+-                       proc_id=proc_id, pid=parsed.get("pid"), label=label)
 +        _journal_spawn(journal_dm_file or dm_file,
 +                       delivery_id=delivery_id or (_dm_delivery_id(journal_dm_file or dm_file)
 +                                                   if (journal_dm_file or dm_file) else ""),
-                        proc_id=proc_id, pid=parsed.get("pid"), label=label)
++                       proc_id=proc_id, pid=parsed.get("pid"), label=label, sender=sender)
          if parsed.get("notify_on_complete") is False:
              # terminal_tool refused the completion promise: this session (api_server, one-shot
+             # runner) cannot receive an async completion, so the recipient's reply would never

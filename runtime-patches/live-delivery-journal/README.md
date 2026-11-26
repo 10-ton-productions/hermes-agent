@@ -36,12 +36,38 @@ The message arrived. The journal could not see it — a missing instrument, not 
 
 Fleet blast radius, spawn rows after the wrapper generation: **80 identity-less of 2,112**
 (chief-of-staff 61, builder 9, ops 8, researcher 2). **65 of 96 `unsettled` verdicts** point at those
-rows. The other 31 had identity and went unsettled for a different reason (no arrival row matched),
-which this fix does not address.
+rows.
+
+### The other 31 — traced to the body, 2026-11-26
+
+Those 31 had identity, so each one can be followed to its sender's `message_agent` call and its exact
+body. All 31 were recovered that way (the delivery body equals `"Message from <name> (@<handle>): "`
+plus the call's message). Looking each body up in the target's own `state.db`:
+
+| verdict | count | how it was decided |
+|---|---:|---|
+| arrived, settle missed it | 18 | target store holds the body (head and/or tail text) |
+| no copy anywhere in the target store | 13 | neither the first nor the last 150 chars of the body appear in any row |
+| of those, sender told it failed | 2 | sender store holds the run's failure notification |
+| **of those, nothing on either side** | **11** | no copy in the target, no failure notice to the sender |
+
+**Eleven sends have no arrival and no failure record: 6 to ops, 1 to chief-of-staff, 4 to builder
+(2026-11-26, 02:53–03:25).** The builder four are the strongest case because the sender said so in
+writing — chief-of-staff's next message to builder (04:11:16Z) opens *"Fresh order, re-issued because
+the original never landed."*
+
+**That reverses the earlier verdict.** The journal cannot report a delivery it made (the defect this
+patch fixes), **and the live lane can also lose one silently** — the ack says `queued`, the target
+store never gets the row, and no terminal journal row exists to contradict it. The sender's only
+signal is that nothing came back.
+
+This patch does not stop that loss. It makes it visible and traceable: with `delivery_id`, payload id,
+body digest and **sender** on the spawn row, a missing arrival is one query per row instead of a
+7,105-call sweep across 33 stores.
 
 ## The patch
 
-`bot_mode_dm.py.78b0506f.patch` (112 lines) against the deployed blob:
+`bot_mode_dm.py.78b0506f.patch` (138 lines) against the deployed blob:
 
 - `_journal_live_terminal(...)` — one new writer. `settled` → `delivered`; `failed` / `cancelled` →
   `delivery_failed` with the owner's reason. `queued` / `claimed` / `ambiguous` write **nothing**:
@@ -55,6 +81,10 @@ which this fix does not address.
   is queued.
 - `_start_delivery` live branch — passes `delivery_id=record["delivery_id"]` and
   `journal_dm_file=dm_file`.
+- **`sender` on the spawn row.** `_journal_spawn` grows an optional `sender`, `_spawn_delivery`
+  passes it through, and both lanes hand it `(author or {}).get("id")`. Without it a lost row cannot
+  be traced to its sender without sweeping every profile store — which is how the 31 above were
+  traced, at 7,105 candidate calls.
 
 ## Proof (re-run against a throwaway target, real processes)
 
@@ -71,8 +101,8 @@ patched(failed) : rc 1, journal rows [{outcome: delivery_failed, detail: "live o
 `probe-spawn-identity.py` calls the real `_spawn_delivery` and prints the spawn row:
 
 ```
-old call: payload_id null           body_sha16 null               body_len null
-new call: payload_id dm-spawn-…txt  body_sha16 c0735c27577c33a4   body_len 61
+old call: payload_id null           body_sha16 null               body_len null  sender null
+new call: payload_id dm-spawn-…txt  body_sha16 c0735c27577c33a4   body_len 61    sender bot:builder
 ```
 
 Statuses `queued` / `claimed` / `ambiguous` were driven through the new writer directly: 3 rows for
@@ -99,11 +129,16 @@ patch -p0 < bot_mode_dm.py.78b0506f.patch
 # revert: restore the .bak file; the patched file is also recoverable from this directory
 ```
 
-`bot_mode_dm.patched.py.txt` is the same result for reading, sha256 `446c7fff53373cb2fc09dd84…` (see
-`SHA256SUMS`).
+`bot_mode_dm.patched.py.txt` is the same result for reading; its sha256 is the one in `SHA256SUMS`
+(currently `78adf6b09a0a30c947e8b824b71b15d5f63e1bc74a159dfcd1b5315d54e56ee0`).
 
 ## Still open
 
+- **The loss itself is on the consumer side, not here.** A mailbox receipt can settle without the
+  target turn ever writing its user row, and the receipt is deleted at settlement, so nothing survives
+  that could say "taken, never written". The instrument that closes this: the consumer records the
+  arrival row id on the receipt, and a receipt that settles with no arrival id is itself the alarm.
+  Until that exists, a lost send is detectable only because the sender notices the silence.
 - A live **admission** failure (the `except` in `_start_delivery`, and `_run_delivery` printing
   `ambiguous`) returns a typed ack but writes no journal row at all — no process, so no spawn row and
   nothing to pair. The sender is told; the journal is silent.

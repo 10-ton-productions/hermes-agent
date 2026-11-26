@@ -38,7 +38,8 @@ def main() -> int:
         ack = module._spawn_delivery("sleep 1", "dlprobe", delivery_id=delivery_id, task_id=None, agent=None)
     else:
         ack = module._spawn_delivery("sleep 1", "dlprobe", delivery_id=delivery_id,
-                                     journal_dm_file=str(payload), task_id=None, agent=None)
+                                     journal_dm_file=str(payload), task_id=None, agent=None,
+                                     sender="bot:builder")
     rows = [json.loads(line) for line in (journal / "outcomes.jsonl").read_text().splitlines() if line.strip()] \
         if (journal / "outcomes.jsonl").exists() else []
     print(json.dumps({"ack": json.loads(ack), "spawn_rows": [{k: r.get(k) for k in

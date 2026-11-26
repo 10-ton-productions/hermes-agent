@@ -758,7 +758,7 @@ def _body_identity(dm_file: Optional[str]) -> dict:
 
 
 def _journal_spawn(dm_file: Optional[str], *, delivery_id: str, proc_id: str,
-                   pid: Optional[int], label: str) -> None:
+                   pid: Optional[int], label: str, sender: Optional[str] = None) -> None:
     """One row when a delivery is handed to its process, not when that process finishes.
 
     A delivery whose process died before writing an outcome left nothing at all: the ack said
@@ -786,6 +786,7 @@ def _journal_spawn(dm_file: Optional[str], *, delivery_id: str, proc_id: str,
            "proc": proc_id,
            "pid": pid,
            "target": (label or "").lstrip("@") or None,
+           "sender": sender or None,
            "payload_id": Path(dm_file).name if dm_file else None}
     row.update(_body_identity(dm_file))
     try:
@@ -1548,11 +1549,13 @@ def _start_delivery(argv: list[str], content: str, label: str, *, stdin_file: bo
     except BaseException:
         _unlink_dm_file(dm_file)
         raise
-    return _spawn_delivery(command, label, dm_file=dm_file, task_id=task_id, agent=agent)
+    return _spawn_delivery(command, label, dm_file=dm_file, task_id=task_id, agent=agent,
+                           sender=(author or {}).get("id"))
 
 
 def _spawn_delivery(command: str, label: str, *, dm_file: Optional[str] = None, delivery_id: Optional[str] = None,
-                    task_id: Optional[str], agent: Any, journal_dm_file: Optional[str] = None) -> str:
+                    task_id: Optional[str], agent: Any, journal_dm_file: Optional[str] = None,
+                    sender: Optional[str] = None) -> str:
     """Launch the cleanup-owning runner and transfer file ownership on ack. ``dm_file``
     is None for relay deliveries (the waiter watches a reply file; envelope artifacts
     are owned/swept by ``tools/bot_relay.py``), which pass the envelope id as ``delivery_id``
@@ -1595,7 +1598,7 @@ def _spawn_delivery(command: str, label: str, *, dm_file: Optional[str] = None, 
         _journal_spawn(journal_dm_file or dm_file,
                        delivery_id=delivery_id or (_dm_delivery_id(journal_dm_file or dm_file)
                                                    if (journal_dm_file or dm_file) else ""),
-                       proc_id=proc_id, pid=parsed.get("pid"), label=label)
+                       proc_id=proc_id, pid=parsed.get("pid"), label=label, sender=sender)
         if parsed.get("notify_on_complete") is False:
             # terminal_tool refused the completion promise: this session (api_server, one-shot
             # runner) cannot receive an async completion, so the recipient's reply would never
