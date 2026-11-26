@@ -1,0 +1,112 @@
+--- bot_mode_dm.py.orig	2026-11-15 08:18:20.009290654 -0700
++++ bot_mode_dm.py	2026-11-25 21:57:30.538643289 -0700
+@@ -701,6 +701,43 @@
+         logger.debug("delivered-journal write failed", exc_info=True)
+ 
+ 
++def _journal_live_terminal(dm_file: Optional[str], *, delivery_id: Optional[str], home: Optional[str],
++                           status: str, detail: str = "", waited_seconds: float | None = None) -> None:
++    """One row when a mailbox (live-owner) delivery reaches a terminal state.
++
++    The live path returns straight out of ``_wait_live_dm``, and ``delivered`` /
++    ``delivery_failed`` were only ever written by the CLI-turn lane: a send admitted to a live Bot
++    Chat owner therefore left its spawn row unpaired forever, and the settle pass could only call it
++    ``unsettled`` — a journal gap reported against a message that had in fact arrived (2026-11-26).
++
++    ``queued`` / ``claimed`` / ``ambiguous`` write NOTHING on purpose. "Still in flight" and "cannot
++    tell" are the settle pass's verdicts, never this row's: a row claiming either would close the
++    spawn row silently, which is the defect this function exists to remove, one layer up.
++    """
++    target = Path(home).name if home else None
++    row = {"ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
++           "target": target,
++           "target_home": home or None,
++           "delivery_id": delivery_id or None,
++           "payload_id": Path(dm_file).name if dm_file else None,
++           "waited_seconds": None if waited_seconds is None else round(waited_seconds)}
++    if status == "settled":
++        row["outcome"] = "delivered"
++    elif status in ("failed", "cancelled"):
++        row.update(outcome="delivery_failed", exit_code=1,
++                   detail=("live owner reported %s" % status) + ((": " + detail) if detail else ""))
++    else:
++        return
++    try:
++        _DELIVERY_OUTCOME_DIR.mkdir(parents=True, exist_ok=True)
++        with open(_DELIVERY_OUTCOME_DIR / "outcomes.jsonl", "a", encoding="utf-8") as stream:
++            stream.write(json.dumps(row, separators=(",", ":")) + "\n")
++            stream.flush()
++            os.fsync(stream.fileno())
++    except OSError:
++        logger.debug("live terminal-journal write failed", exc_info=True)
++
++
+ def _body_identity(dm_file: Optional[str]) -> dict:
+     """The handed-off body's identity: 16 hex of squashed sha256, plus its squashed length.
+ 
+@@ -1206,6 +1243,7 @@
+     from tools.bot_live_delivery import await_delivery, cancel_queued_delivery, owner_holds_delivery
+ 
+     deadline = time.monotonic() + _LIVE_WAIT_MAX_SECONDS
++    started = time.monotonic()
+     missed = 0
+     while True:
+         record = await_delivery(home, delivery_id, max(0.0, min(_LIVE_WAIT_SECONDS, deadline - time.monotonic())))
+@@ -1237,6 +1275,12 @@
+     status = record["status"] if record else "ambiguous"
+     payload = {key: record[key] for key in ("reply", "error", "reason") if record and record.get(key)}
+     payload.update(status=status, delivery_id=delivery_id)
++    # The lane's terminal row, where the runner can still see the receipt: this function returns
++    # straight to the exit, and the CLI lane's own journal calls are never reached.
++    _journal_live_terminal(os.fspath(dm_file) if dm_file is not None else None, delivery_id=delivery_id,
++                           home=str(home), status=status,
++                           detail=str(payload.get("error") or payload.get("reason") or ""),
++                           waited_seconds=time.monotonic() - started)
+     if status in ("queued", "claimed", "ambiguous"):
+         payload["detail"] = "Delivery remains pending or its outcome is unknown. Do not resend; receipt is retained."
+     elif status == "settled" and dm_file is not None:
+@@ -1482,7 +1526,8 @@
+                 "evidence_file": dm_file})
+         if record is not None:
+             command = _delivery_command(argv, dm_file, stdin_file=False, profile_home=profile_home, author=author)
+-            notification = json.loads(_spawn_delivery(command, label, task_id=task_id, agent=agent))
++            notification = json.loads(_spawn_delivery(command, label, delivery_id=record["delivery_id"],
++                                                      journal_dm_file=dm_file, task_id=task_id, agent=agent))
+             result = dict(status=record["status"], delivery_id=record["delivery_id"], to=label,
+                           detail="Durably queued for the live Bot Chat owner. Do NOT wait or resend; finish your turn.")
+             if notification.get("error"):
+@@ -1507,12 +1552,20 @@
+ 
+ 
+ def _spawn_delivery(command: str, label: str, *, dm_file: Optional[str] = None, delivery_id: Optional[str] = None,
+-                    task_id: Optional[str], agent: Any) -> str:
++                    task_id: Optional[str], agent: Any, journal_dm_file: Optional[str] = None) -> str:
+     """Launch the cleanup-owning runner and transfer file ownership on ack. ``dm_file``
+     is None for relay deliveries (the waiter watches a reply file; envelope artifacts
+     are owned/swept by ``tools/bot_relay.py``), which pass the envelope id as ``delivery_id``
+     instead. The ack is ``queued`` + ``delivery_id`` like the live-owner branch: hand-off
+-    to a background process, never a delivery receipt."""
++    to a background process, never a delivery receipt.
++
++    ``journal_dm_file`` names the payload for the journal ONLY, when the file's cleanup belongs to
++    someone else. The live-owner branch already handed the message to the owner's mailbox before
++    spawning the runner, so it must not transfer file ownership here — unlinking on a spawn failure
++    would destroy the only local copy of a delivery the mailbox says is queued. Without it, that
++    branch's spawn row carried no payload id and no body digest at all, so no terminal row could
++    ever pair with it and every live delivery read as a journal gap.
++    """
+     transferred = False
+     try:
+         from tools.terminal_tool import terminal_tool
+@@ -1539,8 +1592,9 @@
+         transferred = True
+         # Journal the hand-off BEFORE the ack is returned: a process that dies silently must leave
+         # the row it created, so the lane can tell a lost delivery from one it never started.
+-        _journal_spawn(dm_file,
+-                       delivery_id=delivery_id or (_dm_delivery_id(dm_file) if dm_file else ""),
++        _journal_spawn(journal_dm_file or dm_file,
++                       delivery_id=delivery_id or (_dm_delivery_id(journal_dm_file or dm_file)
++                                                   if (journal_dm_file or dm_file) else ""),
+                        proc_id=proc_id, pid=parsed.get("pid"), label=label)
+         if parsed.get("notify_on_complete") is False:
+             # terminal_tool refused the completion promise: this session (api_server, one-shot
